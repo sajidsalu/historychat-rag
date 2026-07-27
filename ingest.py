@@ -1,11 +1,12 @@
-"""Fetch and clean Einstein's Wikipedia article. Run once: python ingest.py"""
+"""Fetch and clean a historical figure's Wikipedia article.
+
+Reusable for the API pipeline; also runnable as: python ingest.py
+"""
 
 import re
 from pathlib import Path
 
 import wikipediaapi
-
-OUTPUT_PATH = Path("data/einstein/wikipedia.txt")
 
 # Drop these sections and everything after them (boilerplate, not biography).
 STOP_SECTIONS = (
@@ -19,12 +20,42 @@ STOP_SECTIONS = (
     "Publications",  # citation lists, not biographical prose
 )
 
+# Prefer canonical Wikipedia titles for known starter figures.
+WIKI_TITLE_ALIASES = {
+    "einstein": "Albert Einstein",
+    "albert einstein": "Albert Einstein",
+    "gandhi": "Mahatma Gandhi",
+    "mahatma gandhi": "Mahatma Gandhi",
+    "marie curie": "Marie Curie",
+}
+
+
+class WikipediaNotFoundError(Exception):
+    """Raised when the Wikipedia page does not exist for a given name."""
+
+
+def slugify(name: str) -> str:
+    """Turn a display name into a filesystem-safe folder key."""
+    slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower())
+    return slug.strip("_") or "unknown"
+
+
+def data_dir(figure_slug: str) -> Path:
+    return Path("data") / figure_slug
+
+
+def wikipedia_path(figure_slug: str) -> Path:
+    return data_dir(figure_slug) / "wikipedia.txt"
+
+
+def resolve_wiki_title(name: str) -> str:
+    return WIKI_TITLE_ALIASES.get(name.strip().lower(), name.strip())
+
 
 def clean_text(text: str) -> str:
     # Cut at the first stop-section header (line that is exactly the section title).
     cut_at = len(text)
     for section in STOP_SECTIONS:
-        # Match a line that is only the section title (wikipedia-api plain text format).
         match = re.search(rf"(?m)^{re.escape(section)}\s*$", text)
         if match and match.start() < cut_at:
             cut_at = match.start()
@@ -38,23 +69,36 @@ def clean_text(text: str) -> str:
     return text.strip() + "\n"
 
 
-def main() -> None:
+def fetch_wikipedia_text(name: str) -> str:
+    """Fetch + clean Wikipedia prose for `name`. Raises WikipediaNotFoundError."""
+    title = resolve_wiki_title(name)
     wiki = wikipediaapi.Wikipedia(
-        user_agent="HistoryChat/0.1 (learning project; local ingest script)",
+        user_agent="HistoryChat/0.1 (learning project; local ingest)",
         language="en",
     )
-    page = wiki.page("Albert Einstein")
+    page = wiki.page(title)
     if not page.exists():
-        raise SystemExit("Wikipedia page 'Albert Einstein' not found.")
+        raise WikipediaNotFoundError(f"Wikipedia page not found for '{name}' (tried '{title}').")
+    return clean_text(page.text)
 
-    cleaned = clean_text(page.text)
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(cleaned, encoding="utf-8")
+def ingest_figure(name: str) -> Path:
+    """Fetch Wikipedia for `name` and save to data/<slug>/wikipedia.txt."""
+    figure_slug = slugify(name)
+    cleaned = fetch_wikipedia_text(name)
+    out = wikipedia_path(figure_slug)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(cleaned, encoding="utf-8")
+    return out
 
-    print(f"Saved to {OUTPUT_PATH}")
-    print(f"Total characters: {len(cleaned)}")
-    print(f"First 200 characters:\n{cleaned[:200]}")
+
+def main() -> None:
+    name = "Albert Einstein"
+    path = ingest_figure(name)
+    text = path.read_text(encoding="utf-8")
+    print(f"Saved to {path}")
+    print(f"Total characters: {len(text)}")
+    print(f"First 200 characters:\n{text[:200]}")
 
 
 if __name__ == "__main__":

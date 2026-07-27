@@ -1,10 +1,9 @@
-"""Chunk Einstein Wikipedia text and embed locally. Run once: python embed.py
+"""Chunk Wikipedia text and embed locally.
+
+Reusable for the API pipeline; also runnable as: python embed.py
 
 Why embeddings: they turn text into vectors so later we can find chunks
 whose meaning is close to a user's question (retrieval), not just keyword match.
-
-Anthropic's API does not offer embeddings, so we use a free local model
-(sentence-transformers / all-MiniLM-L6-v2) instead of a paid embedding API.
 """
 
 import json
@@ -13,9 +12,7 @@ from pathlib import Path
 
 from sentence_transformers import SentenceTransformer
 
-INPUT_PATH = Path("data/einstein/wikipedia.txt")
-OUTPUT_PATH = Path("data/einstein/chunks.json")
-FIGURE = "einstein"
+from ingest import slugify, wikipedia_path
 
 # Target chunk size in words (Architecture step 3: ~200-400).
 MIN_WORDS = 200
@@ -24,6 +21,19 @@ MAX_WORDS = 400
 
 # Small, fast, free local model — no API key / no per-call cost.
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+_model: SentenceTransformer | None = None
+
+
+def chunks_path(figure_slug: str) -> Path:
+    return Path("data") / figure_slug / "chunks.json"
+
+
+def get_embedding_model() -> SentenceTransformer:
+    global _model
+    if _model is None:
+        _model = SentenceTransformer(MODEL_NAME)
+    return _model
 
 
 def word_count(text: str) -> int:
@@ -40,7 +50,6 @@ def split_long_paragraph(paragraph: str) -> list[str]:
     if word_count(paragraph) <= MAX_WORDS:
         return [paragraph]
 
-    # Split on sentence-ending punctuation followed by whitespace.
     sentences = re.split(r"(?<=[.!?])\s+", paragraph)
     chunks: list[str] = []
     current: list[str] = []
@@ -74,7 +83,6 @@ def chunk_text(text: str) -> list[str]:
     for para in paragraphs:
         para_words = word_count(para)
 
-        # Prefer not exceeding MAX_WORDS — flush before adding when needed.
         if current and current_words + para_words > MAX_WORDS:
             chunks.append("\n\n".join(current))
             current = [para]
@@ -83,7 +91,6 @@ def chunk_text(text: str) -> list[str]:
             current.append(para)
             current_words += para_words
 
-        # Soft flush around the target size once we have enough text.
         if current and current_words >= TARGET_WORDS:
             chunks.append("\n\n".join(current))
             current = []
@@ -91,7 +98,6 @@ def chunk_text(text: str) -> list[str]:
 
     if current:
         leftover = "\n\n".join(current)
-        # Only merge a tiny leftover if it won't blow past MAX_WORDS.
         if (
             chunks
             and word_count(leftover) < MIN_WORDS // 2
@@ -104,33 +110,46 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
-def main() -> None:
-    if not INPUT_PATH.exists():
-        raise SystemExit(f"Missing {INPUT_PATH}. Run `python ingest.py` first.")
+def embed_figure(name: str) -> Path:
+    """Chunk + embed data/<slug>/wikipedia.txt → chunks.json for this figure."""
+    figure_slug = slugify(name)
+    input_path = wikipedia_path(figure_slug)
+    output_path = chunks_path(figure_slug)
 
-    text = INPUT_PATH.read_text(encoding="utf-8")
+    if not input_path.exists():
+        raise FileNotFoundError(
+            f"Missing {input_path}. Run ingest for '{name}' first."
+        )
+
+    text = input_path.read_text(encoding="utf-8")
     chunks = chunk_text(text)
     if not chunks:
-        raise SystemExit("No chunks produced — check the source text.")
+        raise ValueError(f"No chunks produced for '{name}'.")
 
-    print(f"Chunked into {len(chunks)} pieces. Loading embedding model...")
-    model = SentenceTransformer(MODEL_NAME)
-    embeddings = model.encode(chunks, show_progress_bar=True)
+    model = get_embedding_model()
+    embeddings = model.encode(chunks, show_progress_bar=False)
 
     records = [
         {
             "text": chunk,
             "embedding": embedding.tolist(),
-            "figure": FIGURE,
+            "figure": figure_slug,
         }
         for chunk, embedding in zip(chunks, embeddings)
     ]
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(json.dumps(records), encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(records), encoding="utf-8")
+    return output_path
 
+
+def main() -> None:
+    name = "Einstein"
+    print(f"Embedding figure: {name}")
+    path = embed_figure(name)
+    records = json.loads(path.read_text(encoding="utf-8"))
     dims = len(records[0]["embedding"])
-    print(f"Saved to {OUTPUT_PATH}")
+    print(f"Saved to {path}")
     print(f"Number of chunks: {len(records)}")
     print(f"Embedding dimensions: {dims}")
     print(

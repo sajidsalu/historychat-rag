@@ -5,3 +5,9 @@ python-dotenv
 wikipedia-api
 numpy
 sentence-transformers
+sqlalchemy>=2.0,<3
+passlib[bcrypt]
+bcrypt<4.1
+python-jose[cryptography]
+email-validator
+httpx

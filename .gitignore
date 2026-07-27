@@ -3,3 +3,7 @@ venv/
 __pycache__/
 *.pyc
 data/*/chunks.json
+*.db
+historychat.db
+frontend/node_modules/
+frontend/dist/

@@ -2,16 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { personalitiesApi } from '../api'
 import { useAuth } from '../AuthContext'
-
-function initials(name) {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w) => w[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase()
-}
+import PersonalityCard from '../components/PersonalityCard'
 
 function routeForPersonality(personality, navigate) {
   if (personality.status === 'ready') {
@@ -59,9 +50,19 @@ export default function Home() {
     setSearching(true)
     try {
       const personality = await personalitiesApi.search(token, name)
+      // Refresh list so new cards (with photos) appear when user comes back
+      try {
+        setPeople(await personalitiesApi.list(token))
+      } catch {
+        // ignore refresh errors
+      }
       routeForPersonality(personality, navigate)
     } catch (err) {
-      setError(err.message)
+      if (err.status === 404) {
+        setError('No historical figure found — try a different name')
+      } else {
+        setError(err.message || 'Search failed')
+      }
     } finally {
       setSearching(false)
     }
@@ -72,7 +73,6 @@ export default function Home() {
       navigate(`/chat/${personality.id}`, { state: { name: personality.name } })
       return
     }
-    // pending/processing/failed → processing screen (can retry failed via search)
     navigate(`/processing/${personality.id}`, { state: { name: personality.name } })
   }
 
@@ -83,7 +83,14 @@ export default function Home() {
           <h1>HistoryChat</h1>
           <p className="muted small">Signed in as {email}</p>
         </div>
-        <button type="button" className="btn ghost" onClick={() => { logout(); navigate('/login') }}>
+        <button
+          type="button"
+          className="btn ghost"
+          onClick={() => {
+            logout()
+            navigate('/login')
+          }}
+        >
           Log out
         </button>
       </header>
@@ -102,29 +109,16 @@ export default function Home() {
           </button>
         </form>
 
-        {error ? <p className="error">{error}</p> : null}
+        {error ? <p className="error search-error">{error}</p> : null}
         {loading ? <p className="muted">Loading personalities…</p> : null}
 
         <div className="card-grid">
           {people.map((p) => (
-            <button
+            <PersonalityCard
               key={p.id}
-              type="button"
-              className="person-card"
+              personality={p}
               onClick={() => onCardClick(p)}
-            >
-              <div className="avatar">
-                {p.photo_url ? (
-                  <img src={p.photo_url} alt="" />
-                ) : (
-                  <span>{initials(p.name)}</span>
-                )}
-              </div>
-              <div className="person-meta">
-                <strong>{p.name}</strong>
-                <span className={`status-pill status-${p.status}`}>{p.status}</span>
-              </div>
-            </button>
+            />
           ))}
         </div>
       </main>

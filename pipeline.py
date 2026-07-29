@@ -21,7 +21,11 @@ def process_personality(personality_id: int) -> None:
         db.commit()
 
         try:
-            ingest_figure(personality.name)
+            _path, photo_url = ingest_figure(personality.name)
+            if photo_url:
+                personality.photo_url = photo_url
+                db.commit()
+
             embed_figure(personality.name)
             invalidate_cache(personality.name)
             personality.status = "ready"

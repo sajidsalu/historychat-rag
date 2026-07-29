@@ -30,6 +30,8 @@ export default function Chat() {
           history.map((m) => ({
             role: m.role === 'assistant' ? 'bot' : 'user',
             content: m.content,
+            has_sources: false,
+            sources: [],
           }))
         )
       } catch (err) {
@@ -63,12 +65,17 @@ export default function Chat() {
       const data = await chatApi.send(token, Number(id), text)
       setMessages((prev) => [
         ...prev,
-        { role: 'bot', content: data.reply || 'No reply returned.' },
+        {
+          role: 'bot',
+          content: data.reply || 'No reply returned.',
+          has_sources: Boolean(data.has_sources),
+          sources: Array.isArray(data.sources) ? data.sources : [],
+        },
       ])
     } catch (err) {
       setMessages((prev) => [
         ...prev,
-        { role: 'bot', content: `Error: ${err.message}` },
+        { role: 'bot', content: `Error: ${err.message}`, has_sources: false, sources: [] },
       ])
     } finally {
       setInFlight(false)
@@ -102,6 +109,21 @@ export default function Chat() {
               <div className="msg bot" key={`b-${i}`}>
                 <div className="msg-label">{name}</div>
                 <div className="bubble">{m.content}</div>
+                {m.has_sources ? (
+                  <details className="sources-panel">
+                    <summary>Sources used ({m.sources.length})</summary>
+                    <div className="sources-list">
+                      {m.sources.map((source, idx) => (
+                        <div className="source-item" key={`s-${i}-${idx}`}>
+                          <span className="source-snippet">{source.text}</span>
+                          <span className="source-score">
+                            {Math.round((source.score || 0) * 100)}% match
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                ) : null}
               </div>
             )
           )

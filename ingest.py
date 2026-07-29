@@ -3,9 +3,13 @@
 Reusable for the API pipeline; also runnable as: python ingest.py
 """
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
+from urllib.parse import quote
 
+import httpx
 import wikipediaapi
 
 # Drop these sections and everything after them (boilerplate, not biography).
@@ -29,9 +33,12 @@ WIKI_TITLE_ALIASES = {
     "marie curie": "Marie Curie",
 }
 
+USER_AGENT = "HistoryChat/0.1 (learning project; local ingest)"
+SUMMARY_URL = "https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
+
 
 class WikipediaNotFoundError(Exception):
-    """Raised when the Wikipedia page does not exist for a given name."""
+    """Raised when the Wikipedia page does not exist / is not a real article."""
 
 
 def slugify(name: str) -> str:
@@ -69,34 +76,89 @@ def clean_text(text: str) -> str:
     return text.strip() + "\n"
 
 
+def fetch_page_summary(name: str) -> dict:
+    """Hit Wikipedia REST summary. Rejects missing pages and disambiguation pages."""
+    title = resolve_wiki_title(name)
+    url = SUMMARY_URL.format(title=quote(title, safe=""))
+    try:
+        response = httpx.get(
+            url,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            follow_redirects=True,
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        raise WikipediaNotFoundError(
+            f"Could not reach Wikipedia for '{name}'."
+        ) from exc
+
+    if response.status_code == 404:
+        raise WikipediaNotFoundError(
+            f"No historical figure found with that name ('{name}')."
+        )
+    if response.status_code >= 400:
+        raise WikipediaNotFoundError(
+            f"Wikipedia lookup failed for '{name}' (HTTP {response.status_code})."
+        )
+
+    data = response.json()
+    page_type = data.get("type")
+    # "disambiguation" = not a single real figure article
+    if page_type == "disambiguation":
+        raise WikipediaNotFoundError(
+            f"'{name}' matches multiple Wikipedia pages — try a more specific name."
+        )
+    return data
+
+
+def thumbnail_from_summary(summary: dict) -> str | None:
+    thumb = summary.get("thumbnail") or {}
+    source = thumb.get("source")
+    return source if source else None
+
+
+def fetch_thumbnail_url(name: str) -> str | None:
+    """Fetch only the thumbnail URL (for backfills). May raise WikipediaNotFoundError."""
+    return thumbnail_from_summary(fetch_page_summary(name))
+
+
 def fetch_wikipedia_text(name: str) -> str:
     """Fetch + clean Wikipedia prose for `name`. Raises WikipediaNotFoundError."""
     title = resolve_wiki_title(name)
     wiki = wikipediaapi.Wikipedia(
-        user_agent="HistoryChat/0.1 (learning project; local ingest)",
+        user_agent=USER_AGENT,
         language="en",
     )
     page = wiki.page(title)
     if not page.exists():
-        raise WikipediaNotFoundError(f"Wikipedia page not found for '{name}' (tried '{title}').")
+        raise WikipediaNotFoundError(
+            f"Wikipedia page not found for '{name}' (tried '{title}')."
+        )
     return clean_text(page.text)
 
 
-def ingest_figure(name: str) -> Path:
-    """Fetch Wikipedia for `name` and save to data/<slug>/wikipedia.txt."""
+def ingest_figure(name: str) -> tuple[Path, str | None]:
+    """Fetch Wikipedia text + thumbnail; save text to data/<slug>/wikipedia.txt.
+
+    Returns (path_to_text, photo_url_or_none).
+    """
+    summary = fetch_page_summary(name)
+    photo_url = thumbnail_from_summary(summary)
+
     figure_slug = slugify(name)
     cleaned = fetch_wikipedia_text(name)
     out = wikipedia_path(figure_slug)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(cleaned, encoding="utf-8")
-    return out
+    return out, photo_url
 
 
 def main() -> None:
     name = "Albert Einstein"
-    path = ingest_figure(name)
+    path, photo = ingest_figure(name)
     text = path.read_text(encoding="utf-8")
     print(f"Saved to {path}")
+    print(f"Photo URL: {photo}")
     print(f"Total characters: {len(text)}")
     print(f"First 200 characters:\n{text[:200]}")
 

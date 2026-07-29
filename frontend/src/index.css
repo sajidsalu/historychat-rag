@@ -370,6 +370,51 @@ a:hover { text-decoration: underline; }
   border-bottom-left-radius: 6px;
 }
 
+.sources-panel {
+  margin-top: 6px;
+  margin-left: 2px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.sources-panel summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sources-list {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.source-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f6f8fa;
+}
+
+.source-snippet {
+  color: #4b5563;
+  line-height: 1.35;
+}
+
+.source-score {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid #d3d9df;
+  background: #eef2f6;
+  color: #3f4b59;
+}
+
 .typing {
   display: inline-flex;
   align-items: center;

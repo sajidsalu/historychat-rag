@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from auth import create_access_token, get_current_user, hash_password, verify_password
 from database import Message, Personality, User, get_db, init_db, seed_personalities
+from ingest import WikipediaNotFoundError, fetch_page_summary, thumbnail_from_summary
 from pipeline import process_personality
 from retrieve import retrieve
 
@@ -45,6 +46,8 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    has_sources: bool = False
+    sources: list[dict] = Field(default_factory=list)
 
 
 class MessageOut(BaseModel):
@@ -91,6 +94,18 @@ class PersonalityStatusOut(BaseModel):
     status: str
 
 
+HISTORY_WINDOW = 10  # recent messages to include for conversational context
+SOURCES_SCORE_THRESHOLD = 0.35
+SOURCE_SNIPPET_MAX_CHARS = 150
+
+
+def _truncate_source_text(text: str, max_chars: int = SOURCE_SNIPPET_MAX_CHARS) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 3].rstrip() + "..."
+
+
 def build_system_prompt(figure: str, chunks: list[dict]) -> str:
     """Persona + grounding rules. Why a system prompt: it tells the model
     *how* to answer (in character, grounded) before it sees the user question."""
@@ -102,30 +117,78 @@ def build_system_prompt(figure: str, chunks: list[dict]) -> str:
     return f"""You are role-playing as {figure} in an educational simulation.
 Speak in the first person as {figure}.
 
-Rules:
-- Base your answers ONLY on the Source material below. Do not invent facts,
-  opinions, or events that are not supported by it.
-- If the Source material does not cover the question, say so in character
-  (for example, admit you do not recall discussing that, or that it was
-  outside what you wrote about) rather than guessing.
-- Match the voice and tone suggested by the Source material — the documented
-  personality and era — not a generic "old-timey" accent or caricature.
-- Keep answers concise and conversational.
+Rules (follow every rule strictly):
+
+1. NEVER include actions, gestures, or stage directions in any form — no
+   asterisks (*smiles*), no parentheses ((pauses)), no narration of body
+   language. Output spoken words only, as in a real text chat.
+
+2. Base your answers ONLY on the Source material below. Do not invent facts,
+   opinions, or events that are not supported by it. If the Source material
+   does not cover the question, say so in character rather than guessing.
+
+3. Be factually honest about death. If {figure} is deceased and the user asks
+   whether you are alive, how or when you died, state the facts directly from
+   the Source material (date, cause, circumstances). Do not evade, deny, or
+   deflect with metaphor.
+
+4. Match response length to the question. Yes/no or simple factual questions
+   get 1-2 sentences — no reflective add-ons, no preamble, no restating the
+   question. Only give a longer answer when the question genuinely asks for
+   explanation.
+
+5. Tone: warm, in-character, grounded, and direct. Not performative or
+   theatrical.
+
+Example exchanges (follow this pattern):
+
+User: "Are you alive?"
+{figure}: "No, I died on January 30, 1948. But I'm glad to talk with you about my life and my ideas."
+
+User: "Were you married?"
+{figure}: "Yes, I married Kasturba in 1883, when we were both thirteen."
 
 Source material:
 {sources}
 """
 
 
-def call_ollama(system_prompt: str, user_message: str) -> str:
-    """POST to Ollama's local /api/chat. Uses httpx (already in the venv)."""
+def fetch_recent_history(
+    db: Session, user_id: int, personality_id: int
+) -> list[dict]:
+    """Return the last HISTORY_WINDOW messages as Ollama-format dicts."""
+    rows = (
+        db.query(Message)
+        .filter(
+            Message.user_id == user_id,
+            Message.personality_id == personality_id,
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(HISTORY_WINDOW)
+        .all()
+    )
+    rows.reverse()  # oldest-first
+    return [
+        {"role": m.role if m.role == "user" else "assistant", "content": m.content}
+        for m in rows
+    ]
+
+
+def call_ollama(
+    system_prompt: str,
+    user_message: str,
+    history: list[dict] | None = None,
+) -> str:
+    """POST to Ollama's local /api/chat with optional multi-turn history."""
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
     payload = {
         "model": OLLAMA_MODEL,
         "stream": False,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
+        "messages": messages,
     }
     try:
         response = httpx.post(OLLAMA_URL, json=payload, timeout=120.0)
@@ -220,9 +283,24 @@ def search_personality(
     if existing and existing.status == "ready":
         return existing
 
+    # Validate a real (non-disambiguation) Wikipedia article BEFORE creating a row.
+    try:
+        summary = fetch_page_summary(name)
+    except WikipediaNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="No historical figure found with that name",
+        ) from None
+
+    photo_url = thumbnail_from_summary(summary)
+
     if existing is None:
-        existing = Personality(name=name, photo_url=None, status="pending")
+        existing = Personality(name=name, photo_url=photo_url, status="pending")
         db.add(existing)
+        db.commit()
+        db.refresh(existing)
+    elif photo_url and not existing.photo_url:
+        existing.photo_url = photo_url
         db.commit()
         db.refresh(existing)
 
@@ -304,6 +382,15 @@ async def chat(
     if not message_text:
         raise HTTPException(status_code=400, detail="Message is required")
 
+    import time as _time
+
+    # --- history fetch ---
+    t0 = _time.perf_counter()
+    history = fetch_recent_history(
+        db, current_user.id, personality.id
+    )
+    t_history = _time.perf_counter() - t0
+
     db.add(
         Message(
             user_id=current_user.id,
@@ -314,6 +401,8 @@ async def chat(
     )
     db.commit()
 
+    # --- retrieval ---
+    t1 = _time.perf_counter()
     try:
         chunks = retrieve(message_text, figure=personality.name, top_k=5)
     except FileNotFoundError as exc:
@@ -321,18 +410,30 @@ async def chat(
             status_code=400,
             detail=str(exc),
         ) from None
+    t_retrieve = _time.perf_counter() - t1
 
+    # --- prompt build ---
+    t2 = _time.perf_counter()
     system_prompt = build_system_prompt(personality.name, chunks)
+    t_prompt = _time.perf_counter() - t2
 
-    # Temporary debug print — remove once prompt looks right.
-    print("\n===== SYSTEM PROMPT =====")
-    print(system_prompt)
-    print("===== END SYSTEM PROMPT =====\n")
-
+    # --- Ollama call ---
+    t3 = _time.perf_counter()
     try:
-        reply = call_ollama(system_prompt, message_text)
+        reply = call_ollama(system_prompt, message_text, history=history)
     except RuntimeError as exc:
         reply = str(exc)
+    t_ollama = _time.perf_counter() - t3
+
+    t_total = t_history + t_retrieve + t_prompt + t_ollama
+    print(
+        f"\n⏱  Timing breakdown:\n"
+        f"   history fetch : {t_history:.3f}s\n"
+        f"   retrieval     : {t_retrieve:.3f}s\n"
+        f"   prompt build  : {t_prompt:.3f}s\n"
+        f"   Ollama call   : {t_ollama:.3f}s\n"
+        f"   TOTAL         : {t_total:.3f}s\n"
+    )
 
     db.add(
         Message(
@@ -344,7 +445,19 @@ async def chat(
     )
     db.commit()
 
-    return ChatResponse(reply=reply)
+    top_score = chunks[0]["score"] if chunks else 0.0
+    has_sources = top_score > SOURCES_SCORE_THRESHOLD
+    sources = []
+    if has_sources:
+        sources = [
+            {
+                "text": _truncate_source_text(chunk["text"]),
+                "score": float(chunk["score"]),
+            }
+            for chunk in chunks
+        ]
+
+    return ChatResponse(reply=reply, has_sources=has_sources, sources=sources)
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
